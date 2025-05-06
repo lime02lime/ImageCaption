@@ -2,3 +2,5 @@
 *dataset
 
 .venv
+
+wandb/
