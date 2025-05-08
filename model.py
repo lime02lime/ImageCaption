@@ -344,7 +344,9 @@ def train_model(model, train_dataloader, optimizer, criterion, device, num_epoch
         # Save the most recent model weights to wandb, overwriting the previous one
         model_path = "latest_model.pth"
         torch.save(model.state_dict(), model_path)
-        wandb.save(model_path)
+        artifact = wandb.Artifact("image_caption_model", type="model")
+        artifact.add_file(model_path)
+        wandb.log_artifact(artifact)
 
     # Finish wandb run
     wandb.finish()
