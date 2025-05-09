@@ -1,6 +1,6 @@
 # saved data
 *dataset
-
+*.pth
 .venv
 
 wandb/

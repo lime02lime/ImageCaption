@@ -1,92 +1,41 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim import AdamW
+from torch.nn import CrossEntropyLoss
 from torch.utils.data import Dataset, DataLoader
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 import matplotlib.pyplot as plt
 from PIL import Image
 from transformers import CLIPProcessor, CLIPModel, CLIPTokenizer
 import wandb  # Add this import
+from tqdm import tqdm
+import os
 
-
-from datasets import load_dataset
-from transformers import CLIPProcessor
-from torch.utils.data import DataLoader
-import torch
 
 # Initialize the processor (handles both images and text)
 processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
-# Define the function to preprocess images and captions
-def preprocess_function(samples):
-    # Get the first caption for each image
-    captions = [caption[0] if isinstance(caption, list) else caption for caption in samples['caption']]
+
+def collate_fn(batch):
+    images = [item['image'] for item in batch]
+    captions = [item['caption'][0] if isinstance(item['caption'], list) else item['caption'] for item in batch]
     
-    # Process the images and tokenize the captions
+    # Batch process both text and image
     inputs = processor(
         text=captions,
-        images=samples['image'],
+        images=images,
         padding=True,
         truncation=True,
         max_length=20,
-        return_tensors="pt")
+        return_tensors="pt"
+    )
     
-    # Return the tokenized captions, attention masks, and processed images (already tensors)
     return {
         'input_ids': inputs['input_ids'],
         'attention_mask': inputs['attention_mask'],
-        'pixel_values': inputs['pixel_values'],  # The resized, normalized image tensors
+        'pixel_values': inputs['pixel_values']
     }
-
-# Define the collate function
-def collate_fn(batch):
-    input_ids = torch.stack([torch.tensor(item['input_ids'], dtype=torch.long) for item in batch])
-    attention_mask = torch.stack([torch.tensor(item['attention_mask'], dtype=torch.long) for item in batch])
-    pixel_values = torch.stack([torch.tensor(item['pixel_values']) for item in batch])
-    return {
-        'input_ids': input_ids,
-        'attention_mask': attention_mask,
-        'pixel_values': pixel_values
-    }
-
-
-# Load the dataset
-dataset = load_dataset("nlphuji/flickr30k", split="test[:10000]")
-
-# split into train and test sets
-train_test = dataset.train_test_split(test_size=0.2)
-train_dataset = train_test['train']
-test_dataset = train_test['test']
-
-# Inspect the first example
-example = train_dataset[0]
-print(example.keys())
-
-# Apply the preprocessing function to the train and test datasets
-train_dataset = train_dataset.map(preprocess_function, batched=True)
-test_dataset = test_dataset.map(preprocess_function, batched=True)
-
-# Create the DataLoader for both train and test datasets
-train_dataloader = DataLoader(train_dataset, batch_size=64, collate_fn=collate_fn)
-test_dataloader = DataLoader(test_dataset, batch_size=64, collate_fn=collate_fn)
-
-# Optional: Print the first batch from the dataloader to ensure everything is correct
-for batch in train_dataloader:
-    print(batch)
-    break  # Only print the first batch
-
-# Save the processed datasets to disk
-train_dataset.save_to_disk("train_dataset")
-test_dataset.save_to_disk("test_dataset")
-from datasets import load_from_disk
-
-# Load preprocessed datasets from disk
-#train_dataset = load_from_disk("train_dataset")
-#test_dataset = load_from_disk("test_dataset")
-
-# Create the DataLoader for both train and test datasets
-#train_dataloader = DataLoader(train_dataset, batch_size=32, collate_fn=collate_fn)
-#test_dataloader = DataLoader(test_dataset, batch_size=32, collate_fn=collate_fn)
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -202,19 +151,6 @@ class ImageCaptionModel(nn.Module):
 
         return full_mask.unsqueeze(1)  # (B, 1, T_total, T_total)
 
-        
-    """    
-    def generate_causal_mask(self, attention_mask, seq_len, image_len, device):
-        # Only apply causal mask to the text portion
-        mask = torch.ones(seq_len, seq_len, device=device)
-        mask = torch.tril(mask)  # Causal lower-triangular mask
-        full_mask = torch.ones(seq_len + image_len, seq_len + image_len, device=device)
-
-        # Keep image-image and image-text fully visible (no mask)
-        full_mask[image_len:, image_len:] = mask  # Causal mask for text
-        return full_mask.unsqueeze(0).unsqueeze(1)  # Shape: (1, 1, total_len, total_len)
-    """
-    
 
     def decode(self, images, text_input_ids, attention_mask):
         # Encode image
@@ -277,6 +213,7 @@ class ImageCaptionModel(nn.Module):
 
         return generated[1:]  # Drop BOS token
 
+
 def show_image(image_tensor, ax):
     """
     Helper to display a single image.
@@ -286,13 +223,6 @@ def show_image(image_tensor, ax):
     ax.imshow(img)
     ax.axis('off')
 
-import torch
-from torch.optim import AdamW
-from torch.nn import CrossEntropyLoss
-from tqdm import tqdm
-
-import wandb  # Add this import
-import os  # Add this import for saving images
 
 def train_model(model, train_dataloader, optimizer, criterion, device, num_epochs=5):
     """
@@ -387,28 +317,76 @@ def evaluate_model(model, test_dataloader, criterion, device):
 
 # Example usage
 def main():
+    # Prompt user for mode of operation
+    mode = input("Enter mode (train/finetune/eval/example): ").strip().lower()
+    if mode not in ["train", "finetune", "eval", "example"]:
+        print("[ERROR] Invalid mode. Please enter 'train', 'finetune', 'eval', or 'example'.")
+        return
+
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Using device: {device}")
 
+    # Check if preprocessed datasets exist
+    if os.path.exists("train_dataset") and os.path.exists("test_dataset"):
+        print("[INFO] Loading preprocessed datasets from disk...")
+        train_dataset = load_from_disk("train_dataset")
+        test_dataset = load_from_disk("test_dataset")
+    else:
+        print("[INFO] Preprocessing datasets...")
+        # Load the dataset
+        dataset = load_dataset("nlphuji/flickr30k", split="test[:25000]")
+
+        # Split into train and test sets
+        train_test = dataset.train_test_split(test_size=0.2)
+        train_dataset = train_test['train']
+        test_dataset = train_test['test']
+
+        # Apply the preprocessing function to the train and test datasets
+        #train_dataset = train_dataset.map(preprocess_function, batched=True)
+        #test_dataset = test_dataset.map(preprocess_function, batched=True)
+
+        # Save the processed datasets to disk
+        train_dataset.save_to_disk("train_dataset")
+        test_dataset.save_to_disk("test_dataset")
+
+    # Create the DataLoader for both train and test datasets
+    train_dataloader = DataLoader(train_dataset, batch_size=64, collate_fn=collate_fn)
+    test_dataloader = DataLoader(test_dataset, batch_size=64, collate_fn=collate_fn)
+
     # Initialize model
     model = ImageCaptionModel(
-        num_decoder_layers=4,
+        num_decoder_layers=6,
         decoder_layer=TransformerDecoderBlock,
         emb_dim=1048,
         num_heads=8,
-        ff_hidden_dim=768
+        ff_hidden_dim=1048
     )
+
+    if mode == "finetune":
+        print("[INFO] Loading model weights from latest_model.pth for fine-tuning...")
+        model.load_state_dict(torch.load("latest_model.pth", map_location=device))
 
     # Optimizer and loss function
     optimizer = AdamW(model.parameters(), lr=5e-5)
     criterion = CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id)
 
-    # Train the model
-    train_model(model, train_dataloader, optimizer, criterion, device, num_epochs=16)
-
-    # Evaluate the model
-    evaluate_model(model, test_dataloader, criterion, device)
+    if mode == "train":
+        # Train the model from scratch
+        train_model(model, train_dataloader, optimizer, criterion, device, num_epochs=25)
+    elif mode == "finetune":
+        # Fine-tune the model
+        train_model(model, train_dataloader, optimizer, criterion, device, num_epochs=10)
+    elif mode == "eval":
+        # Evaluate the model
+        print("[INFO] Loading model weights from latest_model.pth for evaluation...")
+        model.load_state_dict(torch.load("latest_model.pth", map_location=device))
+        evaluate_model(model, test_dataloader, criterion, device)
+    elif mode == "example":
+        # Load the model weights for generating captions
+        print("[INFO] Loading model weights from latest_model.pth for generating captions...")
+        model.load_state_dict(torch.load("latest_model.pth", map_location=device))
+        # proceeding to creating sample images
 
     # Generate captions for example images
     model.eval()
