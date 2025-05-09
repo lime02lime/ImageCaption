@@ -224,7 +224,7 @@ def show_image(image_tensor, ax):
     ax.axis('off')
 
 
-def train_model(model, train_dataloader, optimizer, criterion, device, num_epochs=5):
+def train_model(model, train_dataloader, test_dataloader, optimizer, criterion, device, num_epochs=5):
     """
     Train the ImageCaptionModel and log metrics to wandb.
     """
@@ -238,12 +238,12 @@ def train_model(model, train_dataloader, optimizer, criterion, device, num_epoch
     print(f"[INFO] Starting training on {device}")
     model.train()
     model.to(device)
-    
+
     for epoch in range(num_epochs):
         print(f"\n[INFO] Epoch {epoch + 1}/{num_epochs} begins")
         epoch_loss = 0.0
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}")
-        
+
         for i, batch in enumerate(progress_bar):
             # Move batch data to the device
             input_ids = batch['input_ids'].to(device)
@@ -253,12 +253,12 @@ def train_model(model, train_dataloader, optimizer, criterion, device, num_epoch
             # Forward pass
             optimizer.zero_grad()
             logits = model.decode(pixel_values, input_ids[:, :-1], attention_mask[:, :-1])  # Teacher forcing
-            
+
             # Compute loss
             loss = criterion(logits.reshape(-1, logits.size(-1)), input_ids[:, 1:].reshape(-1))
             loss.backward()
             optimizer.step()
-            
+
             epoch_loss += loss.item()
             progress_bar.set_postfix(loss=loss.item())
 
@@ -270,6 +270,13 @@ def train_model(model, train_dataloader, optimizer, criterion, device, num_epoch
 
         # Log epoch loss to wandb
         wandb.log({"epoch": epoch + 1, "epoch_loss": avg_epoch_loss})
+
+        # Evaluate the model on the test dataset
+        eval_loss = evaluate_model(model, test_dataloader, criterion, device)
+        print(f"[INFO] Evaluation Loss after Epoch {epoch + 1}: {eval_loss:.4f}")
+
+        # Log evaluation loss to wandb
+        wandb.log({"epoch": epoch + 1, "eval_loss": eval_loss})
 
         # Save the most recent model weights to wandb, overwriting the previous one
         model_path = "latest_model.pth"
@@ -312,7 +319,47 @@ def evaluate_model(model, test_dataloader, criterion, device):
 
     avg_loss = total_loss / len(test_dataloader)
     print(f"[INFO] Evaluation completed. Average Loss: {avg_loss:.4f}")
+
+    create_sample_images(model, test_dataloader, device)  # Create and save sample images after evaluation
+
     return avg_loss
+
+
+def create_sample_images(model, test_dataloader, device):
+    # Generate captions for example images
+    model.eval()
+    model.to(device)
+
+    # Load a batch from the test dataloader
+    batch = next(iter(test_dataloader))
+    images = batch['pixel_values'][6:12]  # Select 6 images
+    images = images.to(device)
+
+    # Generate captions and display images
+    fig, axs = plt.subplots(2, 3, figsize=(20, 10))
+    for i in range(6):
+        img = images[i].unsqueeze(0)  # Shape: (1, 3, 224, 224)
+
+        # Generate caption
+        with torch.no_grad():
+            token_ids = model.generate(img)
+            caption = model.tokenizer.decode(token_ids, skip_special_tokens=True)
+
+        # Show image and caption
+        ax = axs[i // 3, i % 3]
+        show_image(images[i], ax)
+        ax.set_title(caption, fontsize=10)
+
+    plt.tight_layout()
+
+    # Save the final example images
+    output_dir = "output_images"
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, "example_images.png")
+    plt.savefig(output_path)
+    print(f"[INFO] Example images saved to {output_path}")
+
+    plt.show()
 
 
 # Example usage
@@ -373,10 +420,10 @@ def main():
 
     if mode == "train":
         # Train the model from scratch
-        train_model(model, train_dataloader, optimizer, criterion, device, num_epochs=25)
+        train_model(model, train_dataloader, test_dataloader, optimizer, criterion, device, num_epochs=25)
     elif mode == "finetune":
         # Fine-tune the model
-        train_model(model, train_dataloader, optimizer, criterion, device, num_epochs=10)
+        train_model(model, train_dataloader, test_dataloader, optimizer, criterion, device, num_epochs=10)
     elif mode == "eval":
         # Evaluate the model
         print("[INFO] Loading model weights from latest_model.pth for evaluation...")
@@ -388,40 +435,7 @@ def main():
         model.load_state_dict(torch.load("latest_model.pth", map_location=device))
         # proceeding to creating sample images
 
-    # Generate captions for example images
-    model.eval()
-    model.to(device)
-
-    # Load a batch from the test dataloader
-    batch = next(iter(test_dataloader))
-    images = batch['pixel_values'][6:12]  # Select 6 images
-    images = images.to(device)
-
-    # Generate captions and display images
-    fig, axs = plt.subplots(2, 3, figsize=(20, 10))
-    for i in range(6):
-        img = images[i].unsqueeze(0)  # Shape: (1, 3, 224, 224)
-
-        # Generate caption
-        with torch.no_grad():
-            token_ids = model.generate(img)
-            caption = model.tokenizer.decode(token_ids, skip_special_tokens=True)
-
-        # Show image and caption
-        ax = axs[i // 3, i % 3]
-        show_image(images[i], ax)
-        ax.set_title(caption, fontsize=10)
-
-    plt.tight_layout()
-
-    # Save the final example images
-    output_dir = "output_images"
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, "example_images.png")
-    plt.savefig(output_path)
-    print(f"[INFO] Example images saved to {output_path}")
-
-    plt.show()
+    create_sample_images(model, test_dataloader, device)
 
 if __name__ == "__main__":
     main()
